@@ -13,35 +13,113 @@ class S3Worker(QThread):
     """Worker thread for S3 file listing operations"""
     
     files_loaded = pyqtSignal(list)
+    page_loaded = pyqtSignal(dict)  # New signal for progressive loading
     error_occurred = pyqtSignal(str)
     progress_update = pyqtSignal(str)
+    retry_attempt = pyqtSignal(int, int, str)  # current_attempt, max_attempts, error_msg
+    max_retries_exceeded = pyqtSignal(int, str)  # total_attempts, final_error
     
-    def __init__(self, endpoint_url: str, access_key: str, secret_key: str, bucket_name: str):
+    def __init__(self, endpoint_url: str, access_key: str, secret_key: str, bucket_name: str, verbose: bool = False, max_retries: int = 3, max_pages: int = 10):
         super().__init__()
         self.endpoint_url = endpoint_url
         self.access_key = access_key
         self.secret_key = secret_key
         self.bucket_name = bucket_name
+        self.verbose = verbose
+        self.max_retries = max_retries
+        self.max_pages = max_pages
+        self._stop_requested = False
+        
+    def stop_operation(self):
+        """Request the worker to stop its operation"""
+        self._stop_requested = True
         
     def run(self):
-        try:
-            self.progress_update.emit("Connecting to S3...")
+        attempt = 0
+        last_error = None
+        
+        while attempt < self.max_retries and not self._stop_requested:
+            attempt += 1
             
-            s3_client = S3Client(
-                self.endpoint_url, 
-                self.access_key, 
-                self.secret_key, 
-                self.bucket_name
-            )
-            
-            self.progress_update.emit("Listing bucket contents...")
-            files = s3_client.list_files()
-            
-            self.progress_update.emit(f"Found {len(files)} objects")
-            self.files_loaded.emit(files)
-            
-        except Exception as e:
-            self.error_occurred.emit(str(e))
+            try:
+                if self.verbose:
+                    print(f"[VERBOSE] S3Worker thread started (attempt {attempt}/{self.max_retries})")
+                    print(f"[VERBOSE] Creating S3 client for endpoint: {self.endpoint_url}")
+                
+                if attempt == 1:
+                    self.progress_update.emit("Connecting to S3...")
+                else:
+                    self.progress_update.emit(f"Retrying connection... (attempt {attempt}/{self.max_retries})")
+                
+                s3_client = S3Client(
+                    self.endpoint_url, 
+                    self.access_key, 
+                    self.secret_key, 
+                    self.bucket_name,
+                    self.verbose
+                )
+                
+                if self.verbose:
+                    print(f"[VERBOSE] S3 client created, attempting to list bucket contents progressively...")
+                    
+                self.progress_update.emit("Listing bucket contents...")
+                
+                # Use progressive loading
+                all_files = []
+                
+                def on_page_loaded(page_info):
+                    if self._stop_requested:
+                        return
+                        
+                    all_files.extend(page_info['files'])
+                    
+                    # Emit the page for immediate UI update
+                    self.page_loaded.emit(page_info)
+                    
+                    self.progress_update.emit(f"Loaded page {page_info['page_number']} ({page_info['total_files_so_far']} files total)")
+                    
+                    if self.verbose:
+                        print(f"[VERBOSE] Page {page_info['page_number']} loaded: {page_info['files_in_page']} files")
+                
+                result = s3_client.list_files_progressive(max_pages=self.max_pages, page_callback=on_page_loaded)
+                
+                if self._stop_requested:
+                    return
+                
+                if self.verbose:
+                    print(f"[VERBOSE] Progressive loading completed: {result['pages_processed']} pages, {result['total_files_found']} files")
+                    
+                self.progress_update.emit(f"Loaded {result['total_files_found']} files ({result['pages_processed']} pages)")
+                
+                # Still emit the complete list for compatibility
+                self.files_loaded.emit(all_files)
+                return  # Success - exit the retry loop
+                
+            except Exception as e:
+                last_error = str(e)
+                
+                if self.verbose:
+                    print(f"[VERBOSE] S3Worker attempt {attempt} failed: {last_error}")
+                
+                if attempt < self.max_retries:
+                    # Not the last attempt - emit retry signal
+                    self.retry_attempt.emit(attempt, self.max_retries, last_error)
+                    
+                    if self.verbose:
+                        print(f"[VERBOSE] Will retry in 2 seconds... ({attempt}/{self.max_retries})")
+                    
+                    # Wait 2 seconds before retry (check for stop request every 100ms)
+                    for i in range(20):
+                        if self._stop_requested:
+                            return
+                        self.msleep(100)
+                else:
+                    # Last attempt failed - emit max retries exceeded
+                    if self.verbose:
+                        print(f"[VERBOSE] All {self.max_retries} connection attempts failed")
+                    
+                    self.max_retries_exceeded.emit(self.max_retries, last_error)
+                    return
 
 
 class DownloadWorker(QThread):

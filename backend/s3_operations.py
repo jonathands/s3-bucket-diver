@@ -14,20 +14,28 @@ import os
 class S3Client:
     """S3 client wrapper for handling S3-compatible storage operations"""
     
-    def __init__(self, endpoint_url: str, access_key: str, secret_key: str, bucket_name: str):
+    def __init__(self, endpoint_url: str, access_key: str, secret_key: str, bucket_name: str, verbose: bool = False):
         self.endpoint_url = endpoint_url
         self.access_key = access_key
         self.secret_key = secret_key
         self.bucket_name = bucket_name
+        self.verbose = verbose
         self._client = None
     
     def _get_client(self):
         """Get or create S3 client"""
         if not self._client:
+            if self.verbose:
+                print(f"[VERBOSE] Creating boto3 session with access key: {self.access_key[:8]}...{self.access_key[-4:] if len(self.access_key) > 12 else '***'}")
+                
             session = boto3.Session(
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key
             )
+            
+            if self.verbose:
+                print(f"[VERBOSE] Creating S3 client with endpoint: {self.endpoint_url}")
+                print(f"[VERBOSE] Using signature version: s3v4, addressing style: path")
             
             self._client = session.client(
                 's3',
@@ -39,18 +47,47 @@ class S3Client:
                     }
                 )
             )
+            
+            if self.verbose:
+                print(f"[VERBOSE] S3 client created successfully")
+                
         return self._client
     
-    def list_files(self) -> List[Dict[str, Any]]:
-        """List all files in the bucket"""
+    def list_files_progressive(self, max_pages: int = 10, page_callback=None):
+        """List files progressively, calling callback for each page loaded"""
         try:
+            if self.verbose:
+                print(f"[VERBOSE] Getting S3 client...")
+                print(f"[VERBOSE] Progressive loading with max_pages: {max_pages}")
+                
             client = self._get_client()
+            
+            if self.verbose:
+                print(f"[VERBOSE] Creating paginator for bucket: {self.bucket_name}")
+                
             paginator = client.get_paginator('list_objects_v2')
             page_iterator = paginator.paginate(Bucket=self.bucket_name)
             
-            files = []
+            if self.verbose:
+                print(f"[VERBOSE] Starting progressive iteration through bucket pages...")
+            
+            page_count = 0
+            total_files = 0
+            
             for page in page_iterator:
+                page_count += 1
+                
+                if self.verbose:
+                    print(f"[VERBOSE] Processing page {page_count}")
+                    
+                page_files = []
                 if 'Contents' in page:
+                    page_objects = len(page['Contents'])
+                    total_files += page_objects
+                    
+                    if self.verbose:
+                        print(f"[VERBOSE] Found {page_objects} objects in page {page_count}")
+                        
                     for obj in page['Contents']:
                         file_info = {
                             'key': obj['Key'],
@@ -59,22 +96,81 @@ class S3Client:
                             'etag': obj['ETag'].strip('"'),
                             'storage_class': obj.get('StorageClass', 'STANDARD')
                         }
-                        files.append(file_info)
+                        page_files.append(file_info)
+                        
+                elif self.verbose:
+                    print(f"[VERBOSE] Page {page_count} has no Contents")
+                
+                # Call the callback with this page's data
+                if page_callback and page_files:
+                    page_info = {
+                        'files': page_files,
+                        'page_number': page_count,
+                        'files_in_page': len(page_files),
+                        'total_files_so_far': total_files,
+                        'is_last_page': page_count >= max_pages
+                    }
+                    page_callback(page_info)
+                
+                # Stop after max_pages
+                if page_count >= max_pages:
+                    if self.verbose:
+                        print(f"[VERBOSE] Reached max_pages limit ({max_pages}), stopping")
+                    break
             
-            return files
+            if self.verbose:
+                print(f"[VERBOSE] Progressive loading completed. Processed {page_count} pages, {total_files} files total")
+                
+            return {
+                'pages_processed': page_count,
+                'total_files_found': total_files,
+                'stopped_at_limit': page_count >= max_pages
+            }
             
-        except NoCredentialsError:
+        except NoCredentialsError as e:
+            if self.verbose:
+                print(f"[VERBOSE] NoCredentialsError: {str(e)}")
             raise Exception("Invalid credentials. Please check your access key and secret key.")
-        except EndpointConnectionError:
+        except EndpointConnectionError as e:
+            if self.verbose:
+                print(f"[VERBOSE] EndpointConnectionError: {str(e)}")
+                print(f"[VERBOSE] Attempted endpoint: {self.endpoint_url}")
             raise Exception("Cannot connect to the endpoint. Please check the URL.")
         except ClientError as e:
             error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            if self.verbose:
+                print(f"[VERBOSE] ClientError - Code: {error_code}, Message: {error_message}")
+                print(f"[VERBOSE] Full error response: {e.response}")
+                
             if error_code == 'NoSuchBucket':
                 raise Exception(f"Bucket '{self.bucket_name}' does not exist.")
             elif error_code == 'AccessDenied':
                 raise Exception("Access denied. Please check your credentials and permissions.")
             else:
-                raise Exception(f"AWS Error: {e.response['Error']['Message']}")
+                raise Exception(f"AWS Error: {error_message}")
+        except Exception as e:
+            if self.verbose:
+                print(f"[VERBOSE] Unexpected error: {type(e).__name__}: {str(e)}")
+            raise
+    
+    def list_files(self, max_files: int = 1000) -> List[Dict[str, Any]]:
+        """List files in the bucket (legacy method for compatibility)"""
+        result = []
+        
+        def collect_files(page_info):
+            result.extend(page_info['files'])
+            if len(result) >= max_files:
+                return  # Stop collecting
+        
+        # Calculate how many pages we need for max_files (assuming ~1000 files per page)
+        max_pages = max(1, (max_files + 999) // 1000)  # Round up
+        
+        try:
+            self.list_files_progressive(max_pages=max_pages, page_callback=collect_files)
+            return result[:max_files]  # Return only what was requested
+        except Exception:
+            raise  # Re-raise the exception
     
     def download_file(self, file_key: str, local_path: str) -> None:
         """Download a single file"""

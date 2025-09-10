@@ -21,6 +21,7 @@ class ConnectionWidget(QWidget):
     
     # Signals
     connection_requested = pyqtSignal(str, str, str, str)  # endpoint, access_key, secret_key, bucket
+    connection_cancelled = pyqtSignal()
     
     def __init__(self):
         super().__init__()
@@ -131,13 +132,20 @@ class ConnectionWidget(QWidget):
         layout.addWidget(self.show_passwords_checkbox)
     
     def _setup_connect_controls(self, layout: QHBoxLayout):
-        """Setup browse button"""
+        """Setup browse and cancel buttons"""
         self.connect_button = QPushButton("Browse")
         self.connect_button.clicked.connect(self.request_connection)
         self.connect_button.setDefault(True)
         self.connect_button.setMinimumHeight(24)
         self.connect_button.setMinimumWidth(80)
         layout.addWidget(self.connect_button)
+        
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_connection)
+        self.cancel_button.setMinimumHeight(24)
+        self.cancel_button.setMinimumWidth(60)
+        self.cancel_button.setVisible(False)  # Hidden by default
+        layout.addWidget(self.cancel_button)
     
     def toggle_password_visibility(self, state):
         """Toggle visibility of credential fields"""
@@ -163,9 +171,14 @@ class ConnectionWidget(QWidget):
         
         self.connection_requested.emit(endpoint_url, access_key, secret_key, bucket_name)
     
-    def set_connect_enabled(self, enabled: bool):
-        """Enable or disable the browse button"""
+    def cancel_connection(self):
+        """Handle cancel button click"""
+        self.connection_cancelled.emit()
+    
+    def set_connect_enabled(self, enabled: bool, show_cancel: bool = False):
+        """Enable or disable the browse button and show/hide cancel button"""
         self.connect_button.setEnabled(enabled)
+        self.cancel_button.setVisible(show_cancel)
     
     # Profile Management Methods
     def load_profiles(self):

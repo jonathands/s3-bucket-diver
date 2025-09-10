@@ -6,6 +6,7 @@ Modular version with separated UI components and backend
 
 import sys
 import os
+import argparse
 from typing import List, Dict, Any, Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -24,13 +25,21 @@ from ui import ConnectionWidget, FileListWidget, DetailsWidget
 class S3BrowserMainWindow(QMainWindow):
     """Main window for the S3 browser application"""
     
-    def __init__(self):
+    def __init__(self, verbose: bool = False):
         super().__init__()
         
         # State
         self.current_files: List[Dict[str, Any]] = []
         self.s3_worker: Optional[S3Worker] = None
         self.saved_navigation_state: Optional[Dict[str, Any]] = None
+        self.verbose = verbose
+        
+        # Pagination state
+        self.all_loaded_files: List[Dict[str, Any]] = []  # All files loaded from S3
+        self.files_per_page = 1000  # Files to show per page in UI
+        self.current_page = 1
+        self.total_pages_available = 1
+        self.pages_from_s3 = []  # Track S3 pages loaded
         
         self.init_ui()
         self.setup_status_bar()
@@ -94,12 +103,16 @@ class S3BrowserMainWindow(QMainWindow):
         """Connect signals between components"""
         # Connection widget signals
         self.connection_widget.connection_requested.connect(self.connect_to_s3)
+        self.connection_widget.connection_cancelled.connect(self.cancel_connection)
         
         # File list widget signals
         self.file_list_widget.item_double_clicked.connect(self.on_item_double_clicked)
         self.file_list_widget.selection_changed.connect(self.on_selection_changed)
         self.file_list_widget.upload_requested.connect(self.start_upload)
         self.file_list_widget.refresh_requested.connect(self.refresh_file_list)
+        
+        # Add Load More button to file list widget
+        self._add_load_more_button()
         
         # Details widget signals
         self.details_widget.download_requested.connect(self.start_download)
@@ -109,47 +122,341 @@ class S3BrowserMainWindow(QMainWindow):
         # Set up connection data callback for image previews
         self.details_widget.set_connection_data_callback(self._get_connection_data)
     
+    def _add_load_more_button(self):
+        """Add pagination controls to the file list widget"""
+        from PyQt6.QtWidgets import QPushButton, QHBoxLayout, QLabel
+        
+        # Create pagination controls layout
+        pagination_layout = QHBoxLayout()
+        
+        # Page info label
+        self.page_info_label = QLabel("Page 1 of 1")
+        self.page_info_label.setStyleSheet("color: gray; font-weight: bold;")
+        pagination_layout.addWidget(self.page_info_label)
+        
+        pagination_layout.addStretch()
+        
+        # Previous page button
+        self.prev_page_btn = QPushButton("← Previous")
+        self.prev_page_btn.clicked.connect(self.go_to_previous_page)
+        self.prev_page_btn.setEnabled(False)
+        self.prev_page_btn.setMaximumWidth(80)
+        pagination_layout.addWidget(self.prev_page_btn)
+        
+        # Next page button  
+        self.next_page_btn = QPushButton("Next →")
+        self.next_page_btn.clicked.connect(self.go_to_next_page)
+        self.next_page_btn.setEnabled(False)
+        self.next_page_btn.setMaximumWidth(80)
+        pagination_layout.addWidget(self.next_page_btn)
+        
+        # Load more from S3 button
+        self.load_more_button = QPushButton("Load More from S3")
+        self.load_more_button.clicked.connect(self.load_more_pages)
+        self.load_more_button.setVisible(False)  # Hidden initially
+        self.load_more_button.setMaximumWidth(120)
+        pagination_layout.addWidget(self.load_more_button)
+        
+        # Add pagination controls to the file list widget layout
+        self.file_list_widget.layout().addLayout(pagination_layout)
+        
+        # Track loading state
+        self.is_loading_more = False
+        self.last_connection_data = None
+    
+    def go_to_previous_page(self):
+        """Navigate to the previous page"""
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._show_current_page()
+            self._update_pagination_controls()
+            
+            if self.verbose:
+                print(f"[VERBOSE] Navigated to page {self.current_page}")
+    
+    def go_to_next_page(self):
+        """Navigate to the next page"""
+        if self.current_page < self.total_pages_available:
+            self.current_page += 1
+            self._show_current_page()
+            self._update_pagination_controls()
+            
+            if self.verbose:
+                print(f"[VERBOSE] Navigated to page {self.current_page}")
+    
+    def _show_current_page(self):
+        """Display the files for the current page"""
+        start_idx = (self.current_page - 1) * self.files_per_page
+        end_idx = start_idx + self.files_per_page
+        
+        current_page_files = self.all_loaded_files[start_idx:end_idx]
+        
+        if self.verbose:
+            print(f"[VERBOSE] Showing page {self.current_page}: files {start_idx+1}-{min(end_idx, len(self.all_loaded_files))}")
+        
+        self.file_list_widget.set_files(current_page_files)
+        self.current_files = current_page_files
+        
+        # Update status bar
+        total_files = len(self.all_loaded_files)
+        shown_files = len(current_page_files)
+        self.status_bar.showMessage(f"Showing {shown_files} files (page {self.current_page} of {self.total_pages_available}, {total_files} total)")
+    
+    def _update_pagination_controls(self):
+        """Update the pagination controls based on current state"""
+        # Update page info
+        self.page_info_label.setText(f"Page {self.current_page} of {self.total_pages_available}")
+        
+        # Update button states
+        self.prev_page_btn.setEnabled(self.current_page > 1)
+        self.next_page_btn.setEnabled(self.current_page < self.total_pages_available)
+        
+        # Show load more button if we might have more data in S3
+        # This happens when we've loaded exactly 10 pages worth of data (indicating there might be more)
+        s3_pages_loaded = len(self.pages_from_s3)
+        files_loaded = len(self.all_loaded_files)
+        
+        # Show if we have 10+ pages from S3 and the last page had 1000 files (indicating more data)
+        should_show_load_more = (
+            s3_pages_loaded >= 10 and 
+            s3_pages_loaded % 10 == 0 and  # Loaded in multiples of 10 pages
+            files_loaded >= s3_pages_loaded * 1000  # Each page was full
+        )
+        
+        self.load_more_button.setVisible(should_show_load_more and not self.is_loading_more)
+    
+    def _recalculate_pagination(self):
+        """Recalculate pagination based on loaded files"""
+        total_files = len(self.all_loaded_files)
+        self.total_pages_available = max(1, (total_files + self.files_per_page - 1) // self.files_per_page)
+        
+        # Ensure current page is valid
+        if self.current_page > self.total_pages_available:
+            self.current_page = self.total_pages_available
+        
+        self._update_pagination_controls()
+        
+        if self.verbose:
+            print(f"[VERBOSE] Recalculated pagination: {total_files} files, {self.total_pages_available} pages")
+    
+    def load_more_pages(self):
+        """Load more pages from the current connection"""
+        if self.is_loading_more or not self.last_connection_data:
+            return
+            
+        if self.verbose:
+            print("[VERBOSE] User requested to load more pages")
+            
+        self.is_loading_more = True
+        self.load_more_button.setText("Loading...")
+        self.load_more_button.setEnabled(False)
+        
+        # Start worker with more pages (next 10 pages)
+        conn_data = self.last_connection_data
+        current_s3_pages = len(self.pages_from_s3)
+        new_max_pages = current_s3_pages + 10
+        
+        if self.verbose:
+            print(f"[VERBOSE] Loading more from S3: pages {current_s3_pages + 1} to {new_max_pages}")
+        
+        self.s3_worker = S3Worker(
+            conn_data['endpoint_url'], 
+            conn_data['access_key'], 
+            conn_data['secret_key'], 
+            conn_data['bucket_name'], 
+            self.verbose, 
+            max_retries=3, 
+            max_pages=new_max_pages
+        )
+        
+        # Connect signals for loading more
+        self.s3_worker.page_loaded.connect(self.on_page_loaded)  # Use same handler
+        self.s3_worker.files_loaded.connect(self.on_additional_files_loaded)
+        self.s3_worker.error_occurred.connect(self.on_error_occurred)
+        self.s3_worker.finished.connect(self.on_load_more_finished)
+        
+        self.s3_worker.start()
+    
+    def on_additional_files_loaded(self, files: List[Dict[str, Any]]):
+        """Handle completion of additional file loading"""
+        if self.verbose:
+            print(f"[VERBOSE] Additional loading completed with {len(files)} total files")
+        
+        # Update our complete files list
+        self.all_loaded_files = files
+        
+        # Recalculate pagination with new data
+        self._recalculate_pagination()
+        
+        # Stay on current page or show new data if we're at the end
+        self._show_current_page()
+        
+        if self.verbose:
+            print(f"[VERBOSE] After loading more: {len(self.all_loaded_files)} files, {self.total_pages_available} pages")
+    
+    def on_load_more_finished(self):
+        """Handle load more operation completion"""
+        self.is_loading_more = False
+        self.load_more_button.setText("Load More from S3")
+        self.load_more_button.setEnabled(True)
+    
     def connect_to_s3(self, endpoint_url: str, access_key: str, secret_key: str, bucket_name: str):
         """Connect to S3 and list files"""
-        # Disable UI during connection
-        self.connection_widget.set_connect_enabled(False)
+        if self.verbose:
+            print(f"[VERBOSE] Starting connection to S3...")
+            print(f"[VERBOSE] Endpoint URL: {endpoint_url}")
+            print(f"[VERBOSE] Bucket name: {bucket_name}")
+            print(f"[VERBOSE] Access key: {access_key[:8]}...{access_key[-4:] if len(access_key) > 12 else '***'}")
+        
+        # Save connection data for load more functionality
+        self.last_connection_data = {
+            'endpoint_url': endpoint_url,
+            'access_key': access_key,
+            'secret_key': secret_key,
+            'bucket_name': bucket_name
+        }
+        
+        # Reset pagination state for new connection
+        self.all_loaded_files = []
+        self.current_page = 1
+        self.total_pages_available = 1
+        self.pages_from_s3 = []
+        self.current_pages_loaded = 10  # Initial load
+        
+        # Reset pagination controls
+        self.page_info_label.setText("Page 1 of 1")
+        self.prev_page_btn.setEnabled(False)
+        self.next_page_btn.setEnabled(False)
+        self.load_more_button.setVisible(False)
+            
+        # Disable UI during connection and show cancel option
+        self.connection_widget.set_connect_enabled(False, show_cancel=True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
         self.file_list_widget.clear()
         self.details_widget.clear()
         
-        # Start worker thread
-        self.s3_worker = S3Worker(endpoint_url, access_key, secret_key, bucket_name)
+        if self.verbose:
+            print("[VERBOSE] UI disabled, starting worker thread...")
+        
+        # Start worker thread with progressive loading (10 pages = ~10,000 files)
+        self.s3_worker = S3Worker(endpoint_url, access_key, secret_key, bucket_name, self.verbose, max_retries=3, max_pages=10)
         self.s3_worker.files_loaded.connect(self.on_files_loaded)
+        self.s3_worker.page_loaded.connect(self.on_page_loaded)
         self.s3_worker.error_occurred.connect(self.on_error_occurred)
         self.s3_worker.progress_update.connect(self.on_progress_update)
+        self.s3_worker.retry_attempt.connect(self.on_retry_attempt)
+        self.s3_worker.max_retries_exceeded.connect(self.on_max_retries_exceeded)
         self.s3_worker.finished.connect(self.on_worker_finished)
         self.s3_worker.start()
     
+    def cancel_connection(self):
+        """Cancel the current connection attempt"""
+        if self.s3_worker and self.s3_worker.isRunning():
+            if self.verbose:
+                print("[VERBOSE] User requested connection cancellation")
+            
+            self.s3_worker.stop_operation()
+            self.progress_bar.setVisible(False)
+            self.connection_widget.set_connect_enabled(True, show_cancel=False)
+            self.status_bar.showMessage("Connection cancelled by user")
+    
+    def on_page_loaded(self, page_info: Dict[str, Any]):
+        """Handle progressive page loading"""
+        if self.verbose:
+            print(f"[VERBOSE] Page {page_info['page_number']} loaded with {page_info['files_in_page']} files")
+        
+        # Add files from this page to our complete files list
+        self.all_loaded_files.extend(page_info['files'])
+        
+        # Track this S3 page
+        if page_info['page_number'] not in [p['page_number'] for p in self.pages_from_s3]:
+            self.pages_from_s3.append({
+                'page_number': page_info['page_number'],
+                'files_count': page_info['files_in_page']
+            })
+        
+        # Recalculate pagination
+        self._recalculate_pagination()
+        
+        # If we're on page 1, show the first page immediately
+        if self.current_page == 1:
+            self._show_current_page()
+        
+        # Update status bar
+        if page_info.get('is_last_page', False):
+            self.status_bar.showMessage(f"Loaded {page_info['total_files_so_far']} files from S3")
+        else:
+            self.status_bar.showMessage(f"Loading files... {page_info['total_files_so_far']} so far")
+    
     def on_files_loaded(self, files: List[Dict[str, Any]]):
-        """Handle successful file loading"""
-        self.current_files = files
-        self.file_list_widget.set_files(files)
+        """Handle successful file loading completion"""
+        if self.verbose:
+            print(f"[VERBOSE] Initial loading completed with {len(files)} total files")
+        
+        # Ensure all files are in our main list (should already be there from progressive loading)
+        if len(self.all_loaded_files) != len(files):
+            self.all_loaded_files = files
+            
+        # Final recalculation of pagination
+        self._recalculate_pagination()
+        
+        # Show the first page
+        if self.current_page == 1:
+            self._show_current_page()
         
         # Restore navigation state if we have one saved
         if self.saved_navigation_state is not None:
             self.file_list_widget.restore_navigation_state(self.saved_navigation_state)
             self.saved_navigation_state = None  # Clear it after use
         
-        self.status_bar.showMessage(f"Loaded {len(files)} files successfully")
+        if self.verbose:
+            print(f"[VERBOSE] Final state: {len(self.all_loaded_files)} files, {self.total_pages_available} pages, showing page {self.current_page}")
     
     def on_error_occurred(self, error_message: str):
         """Handle errors from worker threads"""
+        if self.verbose:
+            print(f"[VERBOSE] Connection error occurred: {error_message}")
+            
         QMessageBox.critical(self, "Error", error_message)
         self.status_bar.showMessage("Error occurred")
     
     def on_progress_update(self, message: str):
         """Handle progress updates"""
+        if self.verbose:
+            print(f"[VERBOSE] Progress: {message}")
+            
         self.status_bar.showMessage(message)
+    
+    def on_retry_attempt(self, current_attempt: int, max_attempts: int, error_msg: str):
+        """Handle retry attempt notification"""
+        if self.verbose:
+            print(f"[VERBOSE] Connection attempt {current_attempt}/{max_attempts} failed: {error_msg}")
+            
+        # Show retry message in status bar
+        self.status_bar.showMessage(f"Connection attempt {current_attempt} failed, retrying... ({current_attempt}/{max_attempts})")
+    
+    def on_max_retries_exceeded(self, total_attempts: int, final_error: str):
+        """Handle maximum retries exceeded"""
+        if self.verbose:
+            print(f"[VERBOSE] All {total_attempts} connection attempts failed with final error: {final_error}")
+        
+        # Show detailed error dialog
+        error_message = f"Connection failed after {total_attempts} attempts.\n\n"
+        error_message += f"Final error: {final_error}\n\n"
+        error_message += "Please check:\n"
+        error_message += "• Internet connection\n"
+        error_message += "• Endpoint URL is correct\n"
+        error_message += "• Access credentials are valid\n"
+        error_message += "• Bucket name exists and is accessible\n"
+        error_message += "• Firewall/proxy settings"
+        
+        QMessageBox.critical(self, "Connection Failed", error_message)
+        self.status_bar.showMessage(f"Connection failed after {total_attempts} attempts")
     
     def on_worker_finished(self):
         """Handle worker thread completion"""
-        self.connection_widget.set_connect_enabled(True)
+        self.connection_widget.set_connect_enabled(True, show_cancel=False)
         self.progress_bar.setVisible(False)
     
     def refresh_file_list(self):
@@ -531,20 +838,35 @@ def load_app_icon() -> QIcon:
 
 def main():
     """Main application entry point"""
+    parser = argparse.ArgumentParser(description='S3 Bucket Diver - Browse S3-compatible storage')
+    parser.add_argument('--verbose', '-v', action='store_true', 
+                       help='Enable verbose output for connection debugging')
+    args = parser.parse_args()
+    
+    if args.verbose:
+        print("[VERBOSE] S3 Bucket Diver starting with verbose mode enabled")
+    
     app = QApplication(sys.argv)
     app.setApplicationName("S3 Bucket Diver")
-    app.setApplicationVersion("2.0.0")
+    app.setApplicationVersion("0.0.1")
     
     # Set application icon
     app_icon = load_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
+        if args.verbose:
+            print("[VERBOSE] Application icon loaded successfully")
+    elif args.verbose:
+        print("[VERBOSE] Application icon not found or failed to load")
     
-    window = S3BrowserMainWindow()
+    window = S3BrowserMainWindow(verbose=args.verbose)
     
     # Also set the window icon
     if not app_icon.isNull():
         window.setWindowIcon(app_icon)
+    
+    if args.verbose:
+        print("[VERBOSE] Main window created, showing UI...")
     
     window.show()
     

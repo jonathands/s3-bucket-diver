@@ -227,3 +227,4 @@ docs/build/
 *.bak
 *.backup
 *~
+.flatpak-builder/*
