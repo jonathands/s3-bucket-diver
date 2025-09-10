@@ -11,10 +11,227 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QCheckBox, QFileDialog,
     QMessageBox, QInputDialog, QApplication, QLineEdit, QSpinBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QUrl
+from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent, QDragMoveEvent, QDragLeaveEvent, QPainter, QPen
 
 from backend import FileProcessor
+
+
+class DragDropListWidget(QListWidget):
+    """Custom QListWidget with drag and drop support for file uploads"""
+    
+    # Signal for drag and drop upload
+    files_dropped = pyqtSignal(list, str)  # file_paths, target_prefix
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_widget = parent
+        self.setAcceptDrops(True)
+        self.drag_active = False
+        
+        # Drag overlay
+        self.drag_overlay = None
+        
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """Handle drag enter events"""
+        if event.mimeData().hasUrls():
+            # Check if any URLs are files
+            urls = event.mimeData().urls()
+            has_files = any(url.isLocalFile() for url in urls)
+            
+            if has_files:
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                self.drag_active = True
+                self.show_drag_overlay()
+                return
+        
+        event.ignore()
+    
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        """Handle drag move events"""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            has_files = any(url.isLocalFile() for url in urls)
+            if has_files:
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+                return
+        event.ignore()
+    
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        """Handle drag leave events"""
+        self.drag_active = False
+        self.hide_drag_overlay()
+        super().dragLeaveEvent(event)
+    
+    def dropEvent(self, event: QDropEvent):
+        """Handle drop events"""
+        self.drag_active = False
+        self.hide_drag_overlay()
+        
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            file_paths = []
+            
+            for url in urls:
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if self.is_valid_file_or_directory(file_path):
+                        file_paths.append(file_path)
+            
+            if file_paths:
+                # Get current folder as target prefix
+                target_prefix = ""
+                if self.parent_widget and hasattr(self.parent_widget, 'current_folder'):
+                    target_prefix = self.parent_widget.current_folder or ""
+                
+                # Validate and emit signal
+                validation_result = self.validate_dropped_files(file_paths)
+                if validation_result['valid']:
+                    self.files_dropped.emit(file_paths, target_prefix)
+                else:
+                    # Show warning dialog
+                    self.show_validation_warning(validation_result)
+            
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+    
+    def is_valid_file_or_directory(self, path: str) -> bool:
+        """Check if the path is a valid file or directory"""
+        import os
+        return os.path.exists(path) and (os.path.isfile(path) or os.path.isdir(path))
+    
+    def validate_dropped_files(self, file_paths: List[str]) -> Dict[str, Any]:
+        """Validate dropped files for size and count limits"""
+        import os
+        
+        total_files = 0
+        total_size = 0
+        max_files = 1000  # Maximum number of files
+        max_size = 10 * 1024 * 1024 * 1024  # 10 GB limit
+        
+        def count_files_recursive(path: str) -> tuple:
+            """Count files and total size recursively"""
+            nonlocal total_files, total_size
+            
+            if os.path.isfile(path):
+                total_files += 1
+                total_size += os.path.getsize(path)
+                return 1, os.path.getsize(path)
+            elif os.path.isdir(path):
+                dir_files = 0
+                dir_size = 0
+                try:
+                    for root, dirs, files in os.walk(path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            try:
+                                file_size = os.path.getsize(file_path)
+                                dir_files += 1
+                                dir_size += file_size
+                                total_files += 1
+                                total_size += file_size
+                                
+                                # Early exit if limits exceeded
+                                if total_files > max_files or total_size > max_size:
+                                    return dir_files, dir_size
+                            except (OSError, IOError):
+                                # Skip files that can't be accessed
+                                continue
+                except (OSError, IOError):
+                    # Skip directories that can't be accessed
+                    pass
+                return dir_files, dir_size
+            return 0, 0
+        
+        # Count all files
+        for file_path in file_paths:
+            count_files_recursive(file_path)
+            # Early exit if limits exceeded
+            if total_files > max_files or total_size > max_size:
+                break
+        
+        # Check limits
+        valid = True
+        warnings = []
+        
+        if total_files > max_files:
+            valid = False
+            warnings.append(f"Too many files: {total_files} (limit: {max_files})")
+        
+        if total_size > max_size:
+            valid = False
+            size_mb = total_size / (1024 * 1024)
+            limit_mb = max_size / (1024 * 1024)
+            warnings.append(f"Total size too large: {size_mb:.1f} MB (limit: {limit_mb:.1f} MB)")
+        
+        return {
+            'valid': valid,
+            'total_files': total_files,
+            'total_size': total_size,
+            'warnings': warnings
+        }
+    
+    def show_validation_warning(self, validation_result: Dict[str, Any]):
+        """Show validation warning dialog"""
+        warnings = validation_result['warnings']
+        message = "Cannot upload files:\n\n" + "\n".join(warnings)
+        
+        QMessageBox.warning(self, "Upload Validation Failed", message)
+    
+    def show_drag_overlay(self):
+        """Show drag overlay with upload indication"""
+        if not self.drag_overlay:
+            self.drag_overlay = DragOverlay(self)
+        
+        self.drag_overlay.resize(self.size())
+        self.drag_overlay.show()
+        self.drag_overlay.raise_()
+    
+    def hide_drag_overlay(self):
+        """Hide drag overlay"""
+        if self.drag_overlay:
+            self.drag_overlay.hide()
+    
+    def resizeEvent(self, event):
+        """Handle resize events to update overlay"""
+        super().resizeEvent(event)
+        if self.drag_overlay and self.drag_overlay.isVisible():
+            self.drag_overlay.resize(self.size())
+
+
+class DragOverlay(QWidget):
+    """Overlay widget shown during drag operations"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background-color: rgba(0, 100, 200, 50);")
+        
+        # Create layout for centered text
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Upload icon and text
+        self.label = QLabel("📁 Drop files and folders here to upload")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+                background-color: rgba(0, 0, 0, 100);
+                padding: 20px;
+                border-radius: 10px;
+                border: 2px dashed white;
+            }
+        """)
+        
+        layout.addWidget(self.label)
 
 
 class FileListWidget(QWidget):
@@ -61,12 +278,13 @@ class FileListWidget(QWidget):
         pagination_layout = self._create_pagination_controls()
         layout.addLayout(pagination_layout)
         
-        # File list
-        self.file_list = QListWidget()
+        # File list with drag and drop support
+        self.file_list = DragDropListWidget(self)
         self.file_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.file_list.currentItemChanged.connect(self.on_file_selected)
         self.file_list.itemSelectionChanged.connect(self.selection_changed.emit)
         self.file_list.itemDoubleClicked.connect(self.item_double_clicked.emit)
+        self.file_list.files_dropped.connect(self.on_files_dropped)
         layout.addWidget(self.file_list)
     
     def _create_title_controls(self) -> QHBoxLayout:
@@ -661,3 +879,35 @@ class FileListWidget(QWidget):
         if 0 <= new_page < self.total_pages and new_page != self.current_page:
             self.current_page = new_page
             self.filter_and_paginate_files()
+    
+    def on_files_dropped(self, file_paths: List[str], target_prefix: str):
+        """Handle files dropped onto the file list"""
+        # Expand directories to individual files
+        expanded_files = self.expand_paths_to_files(file_paths)
+        
+        if expanded_files:
+            # Emit upload request with expanded file list
+            self.upload_requested.emit(expanded_files, target_prefix)
+    
+    def expand_paths_to_files(self, paths: List[str]) -> List[str]:
+        """Expand directory paths to individual file paths"""
+        import os
+        
+        expanded_files = []
+        
+        for path in paths:
+            if os.path.isfile(path):
+                expanded_files.append(path)
+            elif os.path.isdir(path):
+                # Walk through directory and add all files
+                try:
+                    for root, dirs, files in os.walk(path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            if os.path.isfile(file_path):
+                                expanded_files.append(file_path)
+                except (OSError, IOError):
+                    # Skip directories that can't be accessed
+                    continue
+        
+        return expanded_files
