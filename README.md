@@ -1,15 +1,17 @@
 # S3 Bucket Diver
 
-A simple Qt6 GUI application for browsing S3-compatible storage services.
+This is a very simple GUI application for browsing and managing S3 compatible storage services.
+
 
 ## Features
 
-- Connect to any S3-compatible storage service (AWS S3, MinIO, DigitalOcean Spaces, etc.)
-- Browse and manage files and folders
+- Connect to S3-compatible storage services
+- Browse and manage files and virtual directories
 - Upload, download, and delete files
 - Search and pagination for large file lists
 - Save and manage connection profiles
 - Export and import credentials as JSON
+- Drag and drop directories/files directly on the files list
 
 ## Requirements
 
@@ -29,6 +31,8 @@ A simple Qt6 GUI application for browsing S3-compatible storage services.
 chmod +x run.sh
 ./run.sh
 ```
+_Use the -v flag for verbose output in the shell_
+
 
 ## Usage
 
@@ -37,15 +41,16 @@ chmod +x run.sh
 3. Click "Browse" to connect and view your files
 4. Use the interface to upload, download, or delete files
 
-## Supported Services
+## Tested Services
 
 - Amazon S3
-- MinIO
-- DigitalOcean Spaces
-- Backblaze B2
-- Wasabi
-- Any other S3-compatible storage service
+- CloudFlare R2
+- Oracle Cloud S3 Storage
 
 ## License
+Licensed under LGPL-3.0 (because Qt requires it)
 
-Licensed under LGPL-3.0 for Qt6 compatibility.
+## TODO
+- [ ] Fix/Warn user about a bug on the virtual directory listing when the file list is very long
+- [ ] Fix flatpak build and release 
+- [ ] Add the ability to work with files en masse without having to select them one by one (downloading/deleting large buckets)
