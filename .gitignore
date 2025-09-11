@@ -228,3 +228,5 @@ docs/build/
 *.backup
 *~
 .flatpak-builder/*
+distributions/*
+repo/*

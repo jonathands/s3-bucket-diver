@@ -9,7 +9,8 @@ import re
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QListWidget, QListWidgetItem, QCheckBox, QFileDialog,
-    QMessageBox, QInputDialog, QApplication, QLineEdit, QSpinBox
+    QMessageBox, QInputDialog, QApplication, QLineEdit, QSpinBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QUrl
 from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent, QDragMoveEvent, QDragLeaveEvent, QPainter, QPen
@@ -17,8 +18,8 @@ from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent, QDragMoveEvent, QDra
 from backend import FileProcessor
 
 
-class DragDropListWidget(QListWidget):
-    """Custom QListWidget with drag and drop support for file uploads"""
+class DragDropTableWidget(QTableWidget):
+    """Custom QTableWidget with drag and drop support for file uploads"""
     
     # Signal for drag and drop upload
     files_dropped = pyqtSignal(list, str)  # file_paths, target_prefix
@@ -32,6 +33,30 @@ class DragDropListWidget(QListWidget):
         # Drag overlay
         self.drag_overlay = None
         
+        # Table configuration
+        self.setup_table()
+    
+    def setup_table(self):
+        """Setup table columns and properties"""
+        # Set column count and headers
+        self.setColumnCount(3)
+        self.setHorizontalHeaderLabels(["Name", "Size", "Date"])
+        
+        # Configure table properties
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSortingEnabled(True)
+        self.setAlternatingRowColors(True)
+        
+        # Configure column widths
+        header = self.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Name column stretches
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Size column fits content
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Date column fits content
+        
+        # Hide vertical header (row numbers)
+        self.verticalHeader().setVisible(False)
+    
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter events"""
         if event.mimeData().hasUrls():
@@ -238,7 +263,7 @@ class FileListWidget(QWidget):
     """Widget for displaying and managing S3 file lists"""
     
     # Signals
-    item_double_clicked = pyqtSignal(QListWidgetItem)
+    item_double_clicked = pyqtSignal(QTableWidgetItem)
     selection_changed = pyqtSignal()
     upload_requested = pyqtSignal(list, str)  # files_to_upload, s3_prefix
     download_requested = pyqtSignal(list)  # selected_items
@@ -278,14 +303,13 @@ class FileListWidget(QWidget):
         pagination_layout = self._create_pagination_controls()
         layout.addLayout(pagination_layout)
         
-        # File list with drag and drop support
-        self.file_list = DragDropListWidget(self)
-        self.file_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.file_list.currentItemChanged.connect(self.on_file_selected)
-        self.file_list.itemSelectionChanged.connect(self.selection_changed.emit)
-        self.file_list.itemDoubleClicked.connect(self.item_double_clicked.emit)
-        self.file_list.files_dropped.connect(self.on_files_dropped)
-        layout.addWidget(self.file_list)
+        # File table with drag and drop support
+        self.file_table = DragDropTableWidget(self)
+        self.file_table.currentItemChanged.connect(self.on_file_selected)
+        self.file_table.itemSelectionChanged.connect(self.selection_changed.emit)
+        self.file_table.itemDoubleClicked.connect(self.item_double_clicked.emit)
+        self.file_table.files_dropped.connect(self.on_files_dropped)
+        layout.addWidget(self.file_table)
     
     def _create_title_controls(self) -> QHBoxLayout:
         """Create the title and control buttons layout"""
@@ -421,28 +445,42 @@ class FileListWidget(QWidget):
             self.filter_and_paginate_files()
     
     def populate_file_list(self, files: List[Dict[str, Any]]):
-        """Populate the file list widget with flat file view"""
-        self.file_list.clear()
+        """Populate the file table widget with flat file view"""
+        self.file_table.setRowCount(len(files))
+        self.file_table.setSortingEnabled(False)  # Disable sorting during population
         
-        for file_info in files:
+        for row, file_info in enumerate(files):
+            # Name column
+            name_item = QTableWidgetItem(f"📄 {file_info['key']}")
+            name_item.setData(Qt.ItemDataRole.UserRole, file_info)
+            self.file_table.setItem(row, 0, name_item)
+            
+            # Size column
             size_str = FileProcessor.format_size(file_info['size'])
+            size_item = QTableWidgetItem(size_str)
+            size_item.setData(Qt.ItemDataRole.UserRole, file_info['size'])  # Store numeric value for sorting
+            self.file_table.setItem(row, 1, size_item)
             
-            # Create list item
-            item_text = f"{file_info['key']} ({size_str})"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, file_info)
-            self.file_list.addItem(item)
+            # Date column
+            date_str = file_info.get('last_modified', 'Unknown')
+            date_item = QTableWidgetItem(date_str)
+            self.file_table.setItem(row, 2, date_item)
             
+        self.file_table.setSortingEnabled(True)  # Re-enable sorting
         self.file_count_label.setText(f"{len(files)} files")
     
     def populate_file_list_with_folders(self):
-        """Populate file list with virtual folder structure"""
+        """Populate file table with virtual folder structure"""
         if not self.current_files:
             return
             
-        self.file_list.clear()
-        
         folders, root_files = FileProcessor.organize_files_by_folders(self.current_files)
+        
+        total_items = len(folders) + len(root_files)
+        self.file_table.setRowCount(total_items)
+        self.file_table.setSortingEnabled(False)  # Disable sorting during population
+        
+        row = 0
         
         # Add folders
         for folder_name in sorted(folders.keys()):
@@ -450,10 +488,8 @@ class FileListWidget(QWidget):
             total_size = sum(f['size'] for f in folder_files)
             size_str = FileProcessor.format_size(total_size)
             
-            item_text = f"📁 {folder_name}/ ({len(folder_files)} files, {size_str})"
-            item = QListWidgetItem(item_text)
-            
-            # Store folder info
+            # Name column
+            name_item = QTableWidgetItem(f"📁 {folder_name}/")
             folder_info = {
                 'is_folder': True,
                 'folder_name': folder_name,
@@ -461,30 +497,57 @@ class FileListWidget(QWidget):
                 'file_count': len(folder_files),
                 'total_size': total_size
             }
-            item.setData(Qt.ItemDataRole.UserRole, folder_info)
-            self.file_list.addItem(item)
+            name_item.setData(Qt.ItemDataRole.UserRole, folder_info)
+            self.file_table.setItem(row, 0, name_item)
+            
+            # Size column
+            size_item = QTableWidgetItem(f"{len(folder_files)} files, {size_str}")
+            size_item.setData(Qt.ItemDataRole.UserRole, total_size)  # Store numeric value for sorting
+            self.file_table.setItem(row, 1, size_item)
+            
+            # Date column
+            date_item = QTableWidgetItem("—")  # Folders don't have dates
+            self.file_table.setItem(row, 2, date_item)
+            
+            row += 1
         
         # Add root files
         for file_info in root_files:
-            size_str = FileProcessor.format_size(file_info['size'])
+            # Name column
+            name_item = QTableWidgetItem(f"📄 {file_info['key']}")
+            name_item.setData(Qt.ItemDataRole.UserRole, file_info)
+            self.file_table.setItem(row, 0, name_item)
             
-            item_text = f"📄 {file_info['key']} ({size_str})"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, file_info)
-            self.file_list.addItem(item)
+            # Size column
+            size_str = FileProcessor.format_size(file_info['size'])
+            size_item = QTableWidgetItem(size_str)
+            size_item.setData(Qt.ItemDataRole.UserRole, file_info['size'])
+            self.file_table.setItem(row, 1, size_item)
+            
+            # Date column
+            date_str = file_info.get('last_modified', 'Unknown')
+            date_item = QTableWidgetItem(date_str)
+            self.file_table.setItem(row, 2, date_item)
+            
+            row += 1
         
+        self.file_table.setSortingEnabled(True)  # Re-enable sorting
         folder_count = len(folders)
         file_count = len(root_files)
         self.file_count_label.setText(f"{folder_count} folders, {file_count} files")
     
     def populate_folder_contents(self, folder_path: str):
-        """Populate the file list with contents of a specific folder"""
+        """Populate the file table with contents of a specific folder"""
         if not self.current_files:
             return
         
-        self.file_list.clear()
-        
         subdirectories, direct_files = FileProcessor.get_folder_contents(self.current_files, folder_path)
+        
+        total_items = len(subdirectories) + len(direct_files)
+        self.file_table.setRowCount(total_items)
+        self.file_table.setSortingEnabled(False)  # Disable sorting during population
+        
+        row = 0
         
         # Add subdirectories first (sorted)
         for subdirectory_name in sorted(subdirectories.keys()):
@@ -492,10 +555,8 @@ class FileListWidget(QWidget):
             total_size = sum(f['size'] for f in subdir_files)
             size_str = FileProcessor.format_size(total_size)
             
-            item_text = f"📁 {subdirectory_name}/ ({len(subdir_files)} files, {size_str})"
-            item = QListWidgetItem(item_text)
-            
-            # Store folder info with the full path
+            # Name column
+            name_item = QTableWidgetItem(f"📁 {subdirectory_name}/")
             folder_info = {
                 'is_folder': True,
                 'folder_name': subdirectory_name,
@@ -504,17 +565,41 @@ class FileListWidget(QWidget):
                 'file_count': len(subdir_files),
                 'total_size': total_size
             }
-            item.setData(Qt.ItemDataRole.UserRole, folder_info)
-            self.file_list.addItem(item)
+            name_item.setData(Qt.ItemDataRole.UserRole, folder_info)
+            self.file_table.setItem(row, 0, name_item)
+            
+            # Size column
+            size_item = QTableWidgetItem(f"{len(subdir_files)} files, {size_str}")
+            size_item.setData(Qt.ItemDataRole.UserRole, total_size)
+            self.file_table.setItem(row, 1, size_item)
+            
+            # Date column
+            date_item = QTableWidgetItem("—")
+            self.file_table.setItem(row, 2, date_item)
+            
+            row += 1
         
         # Add direct files (sorted)
         for file_info, display_name in sorted(direct_files, key=lambda x: x[1]):
-            size_str = FileProcessor.format_size(file_info['size'])
+            # Name column
+            name_item = QTableWidgetItem(f"📄 {display_name}")
+            name_item.setData(Qt.ItemDataRole.UserRole, file_info)
+            self.file_table.setItem(row, 0, name_item)
             
-            item_text = f"📄 {display_name} ({size_str})"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, file_info)
-            self.file_list.addItem(item)
+            # Size column
+            size_str = FileProcessor.format_size(file_info['size'])
+            size_item = QTableWidgetItem(size_str)
+            size_item.setData(Qt.ItemDataRole.UserRole, file_info['size'])
+            self.file_table.setItem(row, 1, size_item)
+            
+            # Date column
+            date_str = file_info.get('last_modified', 'Unknown')
+            date_item = QTableWidgetItem(date_str)
+            self.file_table.setItem(row, 2, date_item)
+            
+            row += 1
+        
+        self.file_table.setSortingEnabled(True)  # Re-enable sorting
         
         if len(subdirectories) > 0:
             self.file_count_label.setText(f"{len(subdirectories)} folders, {len(direct_files)} files in {folder_path}/")
@@ -550,17 +635,24 @@ class FileListWidget(QWidget):
         self.current_page = 0  # Reset to first page when toggling view
         self.refresh_display()
     
-    def get_selected_items(self) -> List[QListWidgetItem]:
+    def get_selected_items(self) -> List[QTableWidgetItem]:
         """Get currently selected items"""
-        return self.file_list.selectedItems()
+        selected_items = []
+        selected_ranges = self.file_table.selectedRanges()
+        for range_ in selected_ranges:
+            for row in range(range_.topRow(), range_.bottomRow() + 1):
+                item = self.file_table.item(row, 0)  # Always get the first column (name column)
+                if item and item not in selected_items:
+                    selected_items.append(item)
+        return selected_items
     
-    def get_current_item(self) -> Optional[QListWidgetItem]:
+    def get_current_item(self) -> Optional[QTableWidgetItem]:
         """Get currently selected item"""
-        return self.file_list.currentItem()
+        return self.file_table.currentItem()
     
     def clear(self):
-        """Clear the file list"""
-        self.file_list.clear()
+        """Clear the file table"""
+        self.file_table.setRowCount(0)
         self.file_count_label.setText("0 files")
         self.current_folder = None
         self.current_page = 0
@@ -569,7 +661,7 @@ class FileListWidget(QWidget):
         self.hide_pagination_controls()
         self.update_navigation_controls()
     
-    def on_file_selected(self, current_item: Optional[QListWidgetItem], previous_item: Optional[QListWidgetItem]):
+    def on_file_selected(self, current_item: Optional[QTableWidgetItem], previous_item: Optional[QTableWidgetItem]):
         """Handle file selection - this can be overridden by parent"""
         pass
     
@@ -709,9 +801,9 @@ class FileListWidget(QWidget):
         self.populate_file_list_paginated(page_files, start_idx, total_items)
     
     def populate_file_list_with_folders_filtered(self):
-        """Populate file list with virtual folder structure (filtered)"""
+        """Populate file table with virtual folder structure (filtered)"""
         if not self.filtered_files:
-            self.file_list.clear()
+            self.file_table.setRowCount(0)
             if self.search_query:
                 self.file_count_label.setText(f"0 files match '{self.search_query}'")
             else:
@@ -755,15 +847,14 @@ class FileListWidget(QWidget):
         end_idx = min(start_idx + self.page_size, len(all_items))
         page_items = all_items[start_idx:end_idx]
         
-        # Populate the list
-        self.file_list.clear()
+        # Populate the table
+        self.file_table.setRowCount(len(page_items))
+        self.file_table.setSortingEnabled(False)  # Disable sorting during population
         
-        for item in page_items:
+        for row, item in enumerate(page_items):
             if item['type'] == 'folder':
-                size_str = FileProcessor.format_size(item['total_size'])
-                item_text = f"📁 {item['name']}/ ({item['file_count']} files, {size_str})"
-                list_item = QListWidgetItem(item_text)
-                
+                # Name column
+                name_item = QTableWidgetItem(f"📁 {item['name']}/")
                 folder_info = {
                     'is_folder': True,
                     'folder_name': item['name'],
@@ -771,15 +862,38 @@ class FileListWidget(QWidget):
                     'file_count': item['file_count'],
                     'total_size': item['total_size']
                 }
-                list_item.setData(Qt.ItemDataRole.UserRole, folder_info)
-                self.file_list.addItem(list_item)
+                name_item.setData(Qt.ItemDataRole.UserRole, folder_info)
+                self.file_table.setItem(row, 0, name_item)
+                
+                # Size column
+                size_str = FileProcessor.format_size(item['total_size'])
+                size_item = QTableWidgetItem(f"{item['file_count']} files, {size_str}")
+                size_item.setData(Qt.ItemDataRole.UserRole, item['total_size'])
+                self.file_table.setItem(row, 1, size_item)
+                
+                # Date column
+                date_item = QTableWidgetItem("—")
+                self.file_table.setItem(row, 2, date_item)
             else:
                 file_info = item['file_info']
+                
+                # Name column
+                name_item = QTableWidgetItem(f"📄 {file_info['key']}")
+                name_item.setData(Qt.ItemDataRole.UserRole, file_info)
+                self.file_table.setItem(row, 0, name_item)
+                
+                # Size column
                 size_str = FileProcessor.format_size(file_info['size'])
-                item_text = f"📄 {file_info['key']} ({size_str})"
-                list_item = QListWidgetItem(item_text)
-                list_item.setData(Qt.ItemDataRole.UserRole, file_info)
-                self.file_list.addItem(list_item)
+                size_item = QTableWidgetItem(size_str)
+                size_item.setData(Qt.ItemDataRole.UserRole, file_info['size'])
+                self.file_table.setItem(row, 1, size_item)
+                
+                # Date column
+                date_str = file_info.get('last_modified', 'Unknown')
+                date_item = QTableWidgetItem(date_str)
+                self.file_table.setItem(row, 2, date_item)
+        
+        self.file_table.setSortingEnabled(True)  # Re-enable sorting
         
         # Update count label
         if self.search_query:
@@ -788,15 +902,28 @@ class FileListWidget(QWidget):
             self.file_count_label.setText(f"{len(folders)} folders, {len(root_files)} files")
     
     def populate_file_list_paginated(self, files: List[Dict[str, Any]], start_idx: int, total_items: int):
-        """Populate the file list widget with paginated file view"""
-        self.file_list.clear()
+        """Populate the file table widget with paginated file view"""
+        self.file_table.setRowCount(len(files))
+        self.file_table.setSortingEnabled(False)  # Disable sorting during population
         
-        for file_info in files:
+        for row, file_info in enumerate(files):
+            # Name column
+            name_item = QTableWidgetItem(f"📄 {file_info['key']}")
+            name_item.setData(Qt.ItemDataRole.UserRole, file_info)
+            self.file_table.setItem(row, 0, name_item)
+            
+            # Size column
             size_str = FileProcessor.format_size(file_info['size'])
-            item_text = f"{file_info['key']} ({size_str})"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, file_info)
-            self.file_list.addItem(item)
+            size_item = QTableWidgetItem(size_str)
+            size_item.setData(Qt.ItemDataRole.UserRole, file_info['size'])
+            self.file_table.setItem(row, 1, size_item)
+            
+            # Date column
+            date_str = file_info.get('last_modified', 'Unknown')
+            date_item = QTableWidgetItem(date_str)
+            self.file_table.setItem(row, 2, date_item)
+        
+        self.file_table.setSortingEnabled(True)  # Re-enable sorting
         
         # Update count label
         if self.search_query:

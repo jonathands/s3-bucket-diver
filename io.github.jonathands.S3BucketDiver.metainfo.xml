@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jonathands.S3BucketDiver</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Unlicense</project_license>
+  
+  <name>S3 Bucket Diver</name>
+  <summary>Browse and manage S3-compatible storage services</summary>
+  
+  <description>
+    <p>
+      S3 Bucket Diver is a simple GUI application for browsing and managing S3-compatible storage services.
+      It provides an intuitive interface for connecting to various cloud storage providers and managing your files.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Connect to S3-compatible storage services</li>
+      <li>Browse and manage files and virtual directories</li>
+      <li>Upload, download, and delete files</li>
+      <li>Search and pagination for large file lists</li>
+      <li>Save and manage connection profiles</li>
+      <li>Export and import credentials as JSON</li>
+      <li>Drag and drop directories/files directly on the files list</li>
+    </ul>
+    <p>Tested with Amazon S3, CloudFlare R2, and Oracle Cloud S3 Storage.</p>
+  </description>
+  
+  <screenshots>
+    <screenshot type="default">
+      <image>https://github.com/user-attachments/assets/40840225-935e-481e-a76f-0eaa0a0c1735</image>
+    </screenshot>
+  </screenshots>
+  
+  <url type="homepage">https://github.com/jonathands/s3-bucket-diver</url>
+  <url type="bugtracker">https://github.com/jonathands/s3-bucket-diver/issues</url>
+  
+  <developer_name>Jonathan Silva</developer_name>
+  
+  <categories>
+    <category>Network</category>
+    <category>FileManager</category>
+  </categories>
+  
+  <releases>
+    <release version="1.0.0" date="2024-01-01">
+      <description>
+        <p>Initial release of S3 Bucket Diver</p>
+      </description>
+    </release>
+  </releases>
+  
+  <content_rating type="oars-1.1" />
+</component>

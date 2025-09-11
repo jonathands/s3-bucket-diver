@@ -1,0 +1,3 @@
+#!/bin/bash
+cd /app/lib/s3-bucket-diver
+python3 s3_browser_app.py "$@"
