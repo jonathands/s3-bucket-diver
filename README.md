@@ -2,7 +2,6 @@
 
 This is a very simple GUI application for browsing and managing S3 compatible storage services.
 
-
 ## Features
 
 - Connect to S3-compatible storage services
@@ -47,10 +46,19 @@ _Use the -v flag for verbose output in the shell_
 - CloudFlare R2
 - Oracle Cloud S3 Storage
 
-## License
-Licensed under LGPL-3.0 (because Qt requires it)
 
 ## TODO
 - [ ] Fix/Warn user about a bug on the virtual directory listing when the file list is very long
 - [ ] Fix flatpak build and release 
 - [ ] Add the ability to work with files en masse without having to select them one by one (downloading/deleting large buckets)
+
+# License
+
+This project is released under the [Unlicense](https://unlicense.org/), do whatever you want with this, it's not that special, really. I only bothered writing this because of Qt6 licensing.
+
+## Third-Party Components
+
+This project uses [Qt 6](https://www.qt.io/), which is licensed under the  
+[GNU Lesser General Public License (LGPL) v3](https://www.gnu.org/licenses/lgpl-3.0.html).
+
+Qt is © The Qt Company Ltd and/or its subsidiaries and other contributors.
