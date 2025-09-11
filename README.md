@@ -1,4 +1,4 @@
-# S3 Bucket Diver
+# S3 Bucket Diver - S3 Browser for Linux
 
 This is a very simple GUI application for browsing and managing S3 compatible storage services.
 
@@ -52,7 +52,7 @@ _Use the -v flag for verbose output in the shell_
 
 ## TODO
 - [ ] Fix/Warn user about a bug on the virtual directory listing when the file list is very long
-- [ ] Fix flatpak build and release 
+- [x] Fix flatpak build and release 
 - [ ] Add the ability to work with files en masse without having to select them one by one (downloading/deleting large buckets)
 
 # License
