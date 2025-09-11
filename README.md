@@ -2,6 +2,8 @@
 
 This is a very simple GUI application for browsing and managing S3 compatible storage services.
 
+<img width="1035" height="759" alt="s3-bucket-diver-screenshot" src="https://github.com/user-attachments/assets/40840225-935e-481e-a76f-0eaa0a0c1735" />
+
 
 ## Features
 
