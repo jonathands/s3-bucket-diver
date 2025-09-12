@@ -1,4 +1,4 @@
-# S3 Bucket Diver - S3 Browser for Linux
+# S3 Bucket Diver - Free S3 Browser for Linux
 
 This is a very simple GUI application for browsing and managing S3 compatible storage services.
 
