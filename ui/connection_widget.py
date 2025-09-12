@@ -11,7 +11,7 @@ from typing import Dict, Any
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
     QPushButton, QGroupBox, QCheckBox, QComboBox,
-    QMessageBox, QInputDialog
+    QMessageBox, QInputDialog, QFileDialog
 )
 from PyQt6.QtCore import pyqtSignal
 
@@ -22,12 +22,13 @@ class ConnectionWidget(QWidget):
     # Signals
     connection_requested = pyqtSignal(str, str, str, str)  # endpoint, access_key, secret_key, bucket
     connection_cancelled = pyqtSignal()
+    profiles_changed = pyqtSignal()  # Emitted when profiles are modified
+    bookmark_added = pyqtSignal(dict)  # Emitted when connection is added to bookmarks
     
     def __init__(self):
         super().__init__()
         self.profiles_file = os.path.join(os.path.expanduser("~"), ".s3_browser_profiles.json")
         self.init_ui()
-        self.load_profiles()
     
     def init_ui(self):
         """Initialize the connection widget UI"""
@@ -36,6 +37,26 @@ class ConnectionWidget(QWidget):
         # Create connection group
         self.connection_group = self._create_connection_group()
         layout.addWidget(self.connection_group)
+        
+        # Create floating favorites button
+        self._create_floating_favorites_button()
+    
+    def _create_floating_favorites_button(self):
+        """Create the floating bookmarks button in top right corner"""
+        self.favorites_button = QPushButton("☆", self)  # Just the star, no text for floating button
+        self.favorites_button.setEnabled(False)  # Disabled initially
+        self.favorites_button.setFixedSize(24, 24)  # Small square button
+        self.favorites_button.clicked.connect(self.add_to_bookmarks)
+        self.favorites_button.setToolTip("Add to Bookmarks")
+        
+        # Position in top right corner
+        self.favorites_button.move(self.width() - 30, 6)
+    
+    def resizeEvent(self, event):
+        """Handle resize to keep favorites button in top right"""
+        super().resizeEvent(event)
+        if hasattr(self, 'favorites_button'):
+            self.favorites_button.move(self.width() - 30, 6)
     
     def _create_connection_group(self) -> QGroupBox:
         """Create the connection settings group with compact layout"""
@@ -43,9 +64,8 @@ class ConnectionWidget(QWidget):
         layout = QVBoxLayout(group)
         layout.setSpacing(4)  # Compact spacing
         
-        # First row: Profile, Endpoint, and Bucket
+        # First row: Endpoint and Bucket
         row1_layout = QHBoxLayout()
-        self._setup_profile_controls(row1_layout)
         self._setup_endpoint_controls(row1_layout)
         self._setup_bucket_controls(row1_layout)
         layout.addLayout(row1_layout)
@@ -57,37 +77,6 @@ class ConnectionWidget(QWidget):
         layout.addLayout(row2_layout)
         
         return group
-    
-    def _setup_profile_controls(self, layout: QHBoxLayout):
-        """Setup profile management controls"""
-        layout.addWidget(QLabel("Profile:"))
-        
-        self.profile_combo = QComboBox()
-        self.profile_combo.setMinimumWidth(120)
-        self.profile_combo.setMaximumWidth(150)
-        self.profile_combo.addItem("-- New --")
-        self.profile_combo.currentTextChanged.connect(self.on_profile_selected)
-        layout.addWidget(self.profile_combo)
-        
-        self.save_profile_button = QPushButton("Save")
-        self.save_profile_button.clicked.connect(self.save_current_profile)
-        self.save_profile_button.setMaximumWidth(50)
-        layout.addWidget(self.save_profile_button)
-        
-        self.delete_profile_button = QPushButton("Del")
-        self.delete_profile_button.clicked.connect(self.delete_current_profile)
-        self.delete_profile_button.setMaximumWidth(40)
-        self.delete_profile_button.setEnabled(False)
-        layout.addWidget(self.delete_profile_button)
-
-        # Export and import buttons
-        self.export_button = QPushButton("Export")
-        self.export_button.clicked.connect(self.export_credentials)
-        layout.addWidget(self.export_button)
-
-        self.import_button = QPushButton("Import")
-        self.import_button.clicked.connect(self.import_credentials)
-        layout.addWidget(self.import_button)
     
     def _setup_endpoint_controls(self, layout: QHBoxLayout):
         """Setup endpoint URL controls"""
@@ -132,7 +121,7 @@ class ConnectionWidget(QWidget):
         layout.addWidget(self.show_passwords_checkbox)
     
     def _setup_connect_controls(self, layout: QHBoxLayout):
-        """Setup browse and cancel buttons"""
+        """Setup browse, cancel, and favorites buttons"""
         self.connect_button = QPushButton("Browse")
         self.connect_button.clicked.connect(self.request_connection)
         self.connect_button.setDefault(True)
@@ -180,60 +169,6 @@ class ConnectionWidget(QWidget):
         self.connect_button.setEnabled(enabled)
         self.cancel_button.setVisible(show_cancel)
     
-    # Profile Management Methods
-    def load_profiles(self):
-        """Load saved credential profiles from file"""
-        try:
-            if os.path.exists(self.profiles_file):
-                with open(self.profiles_file, 'r') as f:
-                    profiles = json.load(f)
-                
-                # Clear existing profiles (except the default)
-                self.profile_combo.clear()
-                self.profile_combo.addItem("-- Select or create new --")
-                
-                # Add saved profiles
-                for profile_name in sorted(profiles.keys()):
-                    self.profile_combo.addItem(profile_name)
-                    
-        except Exception as e:
-            print(f"Error loading profiles: {e}")
-    
-    def save_profiles(self, profiles: Dict[str, Any]):
-        """Save credential profiles to file"""
-        try:
-            with open(self.profiles_file, 'w') as f:
-                json.dump(profiles, f, indent=2)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not save profiles: {e}")
-    
-    def export_credentials(self):
-            """Export credentials to JSON file"""
-            credentials = self.get_current_profile_data()
-            options = QFileDialog.Options()
-            file_name, _ = QFileDialog.getSaveFileName(self, "Export Credentials", "", "JSON Files (*.json)", options=options)
-            if file_name:
-                try:
-                    with open(file_name, 'w') as f:
-                        json.dump(credentials, f, indent=2)
-                    QMessageBox.information(self, "Success", "Credentials exported successfully.")
-                except Exception as e:
-                    QMessageBox.warning(self, "Error", f"Failed to export credentials: {e}")
-
-    def import_credentials(self):
-            """Import credentials from JSON file"""
-            options = QFileDialog.Options()
-            file_name, _ = QFileDialog.getOpenFileName(self, "Import Credentials", "", "JSON Files (*.json)", options=options)
-            if file_name:
-                try:
-                    with open(file_name, 'r') as f:
-                        credentials = json.load(f)
-                    self.load_profile_data(credentials)
-                    QMessageBox.information(self, "Success", "Credentials imported successfully.")
-                except Exception as e:
-                    QMessageBox.warning(self, "Error", f"Failed to import credentials: {e}")
-
-    
     def get_current_profile_data(self) -> Dict[str, str]:
         """Get current form data as profile"""
         return {
@@ -250,115 +185,31 @@ class ConnectionWidget(QWidget):
         self.access_key_edit.setText(profile_data.get("access_key", ""))
         self.secret_key_edit.setText(profile_data.get("secret_key", ""))
     
-    def on_profile_selected(self, profile_name: str):
-        """Handle profile selection from dropdown"""
-        if profile_name == "-- Select or create new --":
-            self.delete_profile_button.setEnabled(False)
+    def add_to_bookmarks(self):
+        """Add current connection to bookmarks using bucket name"""
+        profile_data = self.get_current_profile_data()
+        
+        # Validate that we have connection data
+        if not all([profile_data.get("endpoint_url"), profile_data.get("access_key"), 
+                   profile_data.get("secret_key"), profile_data.get("bucket_name")]):
+            QMessageBox.warning(self, "Incomplete Data", 
+                              "Cannot add to bookmarks: Missing connection information.")
             return
-            
-        try:
-            if os.path.exists(self.profiles_file):
-                with open(self.profiles_file, 'r') as f:
-                    profiles = json.load(f)
-                
-                if profile_name in profiles:
-                    self.load_profile_data(profiles[profile_name])
-                    self.delete_profile_button.setEnabled(True)
-                else:
-                    self.delete_profile_button.setEnabled(False)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not load profile: {e}")
+        
+        # Use bucket name as bookmark name
+        bookmark_name = profile_data.get("bucket_name", "Unknown Bucket")
+        profile_data['name'] = bookmark_name
+        
+        self.bookmark_added.emit(profile_data)
+        QMessageBox.information(self, "Success", 
+                              f"Bucket '{bookmark_name}' has been bookmarked.")
     
-    def save_current_profile(self):
-        """Save current form data as a new profile"""
-        # Validate that we have some data to save
-        current_data = self.get_current_profile_data()
-        if not any(current_data.values()):
-            QMessageBox.warning(self, "Nothing to Save", 
-                              "Please enter connection details before saving a profile.")
-            return
-        
-        # Ask for profile name
-        profile_name, ok = QInputDialog.getText(
-            self, "Save Profile", 
-            "Enter a name for this profile:",
-            QLineEdit.EchoMode.Normal,
-            f"{current_data.get('bucket_name', 'New Profile')}"
-        )
-        
-        if not ok or not profile_name.strip():
-            return
-            
-        profile_name = profile_name.strip()
-        
-        # Load existing profiles
-        profiles = {}
-        try:
-            if os.path.exists(self.profiles_file):
-                with open(self.profiles_file, 'r') as f:
-                    profiles = json.load(f)
-        except Exception as e:
-            print(f"Error loading existing profiles: {e}")
-        
-        # Check if profile already exists
-        if profile_name in profiles:
-            reply = QMessageBox.question(
-                self, "Profile Exists", 
-                f"Profile '{profile_name}' already exists. Overwrite it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-        
-        # Save the profile
-        profiles[profile_name] = current_data
-        self.save_profiles(profiles)
-        
-        # Update the dropdown
-        self.load_profiles()
-        
-        # Select the newly saved profile
-        index = self.profile_combo.findText(profile_name)
-        if index >= 0:
-            self.profile_combo.setCurrentIndex(index)
-    
-    def delete_current_profile(self):
-        """Delete the currently selected profile"""
-        current_profile = self.profile_combo.currentText()
-        
-        if current_profile == "-- Select or create new --":
-            return
-        
-        reply = QMessageBox.question(
-            self, "Delete Profile", 
-            f"Are you sure you want to delete the profile '{current_profile}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        
-        try:
-            # Load existing profiles
-            profiles = {}
-            if os.path.exists(self.profiles_file):
-                with open(self.profiles_file, 'r') as f:
-                    profiles = json.load(f)
-            
-            # Remove the profile
-            if current_profile in profiles:
-                del profiles[current_profile]
-                self.save_profiles(profiles)
-                
-                # Clear the form
-                self.endpoint_edit.setText("https://s3.amazonaws.com")
-                self.bucket_edit.clear()
-                self.access_key_edit.clear()
-                self.secret_key_edit.clear()
-                
-                # Refresh the dropdown
-                self.load_profiles()
-                self.profile_combo.setCurrentIndex(0)
-            
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not delete profile: {e}")
+    def set_bookmarks_enabled(self, enabled: bool):
+        """Enable or disable the bookmarks button"""
+        self.favorites_button.setEnabled(enabled)
+        if enabled:
+            self.favorites_button.setText("⭐")  # Golden star when enabled
+            self.favorites_button.setToolTip("Add to Bookmarks")
+        else:
+            self.favorites_button.setText("☆")  # Gray star when disabled  
+            self.favorites_button.setToolTip("Connect first to add bookmarks")

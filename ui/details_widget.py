@@ -9,12 +9,73 @@ import os
 import requests
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextEdit, QListWidgetItem, QApplication, QScrollArea
+    QTextEdit, QListWidgetItem, QApplication, QScrollArea, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QPixmap, QMovie
 
 from backend import FileProcessor
+
+
+class BucketStatisticsWorker(QThread):
+    """Worker thread for calculating bucket statistics"""
+    
+    statistics_calculated = pyqtSignal(str)  # formatted_statistics_text
+    progress_update = pyqtSignal(str)  # progress_message
+    
+    def __init__(self, all_files: List[Dict[str, Any]]):
+        super().__init__()
+        self.all_files = all_files
+        
+    def run(self):
+        """Calculate simple bucket statistics in background thread"""
+        try:
+            import time
+            import datetime
+            start_time = time.time()
+            print(f"[STATS] Starting simple statistics calculation...")
+            
+            self.progress_update.emit("Calculating basic statistics...")
+            
+            if not self.all_files:
+                self.statistics_calculated.emit("No files loaded yet...")
+                return
+            
+            total_files = len(self.all_files)
+            print(f"[STATS] Total files to process: {total_files:,}")
+            
+            # Simple calculations - just total size and last activity
+            total_size = 0
+            latest_date = ""
+            
+            for file_info in self.all_files:
+                total_size += file_info.get('size', 0)
+                
+                # Track latest modification date
+                last_modified = file_info.get('last_modified', '')
+                if last_modified and (not latest_date or last_modified > latest_date):
+                    latest_date = last_modified
+            
+            # Format simple statistics
+            stats_text = f"""📊 BUCKET STATISTICS
+            
+📁 Basic Summary:
+   Total Files: {total_files:,}
+   Total Size: {FileProcessor.format_size(total_size)}
+   Last Activity: {latest_date if latest_date else 'Unknown'}
+
+🕐 Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+            
+            total_time = time.time() - start_time
+            print(f"[STATS] Simple statistics completed in {total_time:.2f}s for {total_files:,} files")
+            
+            self.statistics_calculated.emit(stats_text)
+            
+        except Exception as e:
+            print(f"[STATS] ERROR during statistics calculation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.statistics_calculated.emit(f"Error calculating statistics: {str(e)}")
 
 
 class ImagePreviewWorker(QThread):
@@ -75,14 +136,38 @@ class DetailsWidget(QWidget):
         self.current_item: Optional[QListWidgetItem] = None
         self.selected_items: List[QListWidgetItem] = []
         self.image_worker: Optional[ImagePreviewWorker] = None
+        self.stats_worker: Optional[BucketStatisticsWorker] = None
         self.connection_data_callback = None  # Will be set by main window
+        self.all_files: List[Dict[str, Any]] = []  # Store all files for statistics
+        self.statistics_calculated = False  # Track if statistics have been calculated
+        self.statistics_tab_index = 1  # Index of the statistics tab
         self.init_ui()
     
     def init_ui(self):
-        """Initialize the details widget UI"""
+        """Initialize the details widget UI with tab interface"""
         layout = QVBoxLayout(self)
         
-        layout.addWidget(QLabel("File Details:"))
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tab_widget)
+        
+        # Create File Details tab
+        self.file_details_tab = self._create_file_details_tab()
+        self.tab_widget.addTab(self.file_details_tab, "File Details")
+        
+        # Create Bucket Statistics tab
+        self.bucket_stats_tab = self._create_bucket_statistics_tab()
+        self.tab_widget.addTab(self.bucket_stats_tab, "Bucket Statistics")
+        
+        # Action buttons at the bottom (outside of tabs)
+        button_layout = self._create_action_buttons()
+        layout.addLayout(button_layout)
+    
+    def _create_file_details_tab(self) -> QWidget:
+        """Create the File Details tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
         
         self.details_text = QTextEdit()
         self.details_text.setReadOnly(True)
@@ -107,12 +192,42 @@ class DetailsWidget(QWidget):
         self.image_scroll_area.setWidget(self.image_display)
         
         layout.addWidget(self.image_scroll_area)
-        
-        # Action buttons
-        button_layout = self._create_action_buttons()
-        layout.addLayout(button_layout)
-        
         layout.addStretch()
+        
+        return tab
+    
+    def _create_bucket_statistics_tab(self) -> QWidget:
+        """Create the Bucket Statistics tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Controls layout
+        controls_layout = QHBoxLayout()
+        
+        # Progress label
+        self.stats_progress_label = QLabel("")
+        controls_layout.addWidget(self.stats_progress_label)
+        
+        controls_layout.addStretch()
+        
+        # Reload button
+        self.reload_stats_button = QPushButton("🔄 Reload Statistics")
+        self.reload_stats_button.setEnabled(False)  # Disabled initially
+        self.reload_stats_button.clicked.connect(self._reload_statistics)
+        self.reload_stats_button.setMaximumWidth(150)
+        controls_layout.addWidget(self.reload_stats_button)
+        
+        layout.addLayout(controls_layout)
+        
+        # Statistics text
+        self.stats_text = QTextEdit()
+        self.stats_text.setReadOnly(True)
+        layout.addWidget(self.stats_text)
+        
+        # Initial message
+        self.stats_text.setText("Connect to an S3 bucket to view statistics...")
+        
+        return tab
     
     def _create_action_buttons(self) -> QHBoxLayout:
         """Create the action buttons layout"""
@@ -299,6 +414,98 @@ Files:
         self.current_item = None
         self.selected_items = []
         self._update_button_states()
+    
+    def update_bucket_statistics(self, all_files: List[Dict[str, Any]]):
+        """Update bucket statistics with all files data"""
+        self.all_files = all_files
+        self.reload_stats_button.setEnabled(bool(all_files))  # Enable button if we have files
+        
+        # For very large buckets, show a message instead of auto-calculating
+        if len(all_files) > 50000:  # 50K+ files
+            self.stats_text.setText(f"""📊 LARGE BUCKET DETECTED
+            
+This bucket contains {len(all_files):,} files.
+
+To avoid performance issues, statistics calculation is not performed automatically.
+
+Click the "🔄 Reload Statistics" button above to manually calculate comprehensive statistics.
+
+⚠️  Note: Statistics calculation for buckets with {len(all_files):,} files may take several seconds to complete.""")
+            print(f"[STATS] Large bucket detected ({len(all_files):,} files) - skipping auto-calculation")
+        else:
+            self._calculate_and_display_statistics()
+    
+    def _calculate_and_display_statistics(self):
+        """Calculate and display bucket statistics using worker thread"""
+        if not self.all_files:
+            self.stats_text.setText("No files loaded yet...")
+            self.reload_stats_button.setEnabled(False)
+            return
+        
+        # Cancel any existing statistics calculation
+        if self.stats_worker and self.stats_worker.isRunning():
+            self.stats_worker.quit()
+            self.stats_worker.wait()
+        
+        # Disable reload button during calculation
+        self.reload_stats_button.setEnabled(False)
+        self.reload_stats_button.setText("Calculating...")
+        
+        print(f"[STATS] Starting statistics calculation for {len(self.all_files):,} files")
+        
+        # Start statistics calculation in worker thread
+        self.stats_worker = BucketStatisticsWorker(self.all_files)
+        self.stats_worker.statistics_calculated.connect(self._on_statistics_calculated)
+        self.stats_worker.progress_update.connect(self._on_statistics_progress)
+        self.stats_worker.finished.connect(self._on_statistics_finished)
+        self.stats_worker.start()
+    
+    def _reload_statistics(self):
+        """Reload statistics calculation"""
+        if self.all_files:
+            self._calculate_and_display_statistics()
+    
+    def _on_statistics_calculated(self, stats_text: str):
+        """Handle completion of statistics calculation"""
+        self.stats_text.setText(stats_text)
+        self.stats_progress_label.setText("Statistics updated successfully")
+        self.statistics_calculated = True  # Mark as calculated
+    
+    def _on_statistics_progress(self, progress_message: str):
+        """Handle progress updates from statistics calculation"""
+        self.stats_progress_label.setText(progress_message)
+    
+    def _on_statistics_finished(self):
+        """Handle statistics worker completion"""
+        self.reload_stats_button.setEnabled(True)
+        self.reload_stats_button.setText("🔄 Reload Statistics")
+        
+        # Clear progress after a delay
+        QTimer.singleShot(3000, lambda: self.stats_progress_label.setText(""))
+    
+    def _on_tab_changed(self, index: int):
+        """Handle tab change - calculate statistics when statistics tab is opened"""
+        if index == self.statistics_tab_index and not self.statistics_calculated and self.all_files:
+            print(f"[STATS] Statistics tab opened - triggering calculation for {len(self.all_files):,} files")
+            self._calculate_and_display_statistics()
+    
+    def store_files_for_statistics(self, all_files: List[Dict[str, Any]]):
+        """Store files for statistics calculation but don't calculate yet"""
+        self.all_files = all_files
+        self.statistics_calculated = False  # Reset calculation flag
+        self.reload_stats_button.setEnabled(bool(all_files))
+        
+        # Reset statistics display
+        if all_files:
+            self.stats_text.setText("Statistics will be calculated when you first open this tab.")
+        else:
+            self.stats_text.setText("No files loaded yet...")
+        
+        print(f"[STATS] Stored {len(all_files):,} files for statistics - calculation deferred until tab access")
+    
+    def update_bucket_statistics(self, all_files: List[Dict[str, Any]]):
+        """Legacy method - now just stores files without auto-calculating"""
+        self.store_files_for_statistics(all_files)
     
     def set_buttons_enabled(self, enabled: bool):
         """Enable or disable all action buttons"""

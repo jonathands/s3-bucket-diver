@@ -336,8 +336,8 @@ class FileListWidget(QWidget):
         title_layout.addWidget(self.breadcrumb_label)
         
         # Virtual directory toggle
-        self.virtual_dirs_checkbox = QCheckBox("Folders")
-        self.virtual_dirs_checkbox.setToolTip("Show files organized in virtual folders")
+        self.virtual_dirs_checkbox = QCheckBox("Emulate Directories")
+        self.virtual_dirs_checkbox.setToolTip("Show files organized in virtual directories")
         self.virtual_dirs_checkbox.stateChanged.connect(self.toggle_virtual_directories)
         title_layout.addWidget(self.virtual_dirs_checkbox)
         

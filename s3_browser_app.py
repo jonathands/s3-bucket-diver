@@ -7,14 +7,15 @@ Modular version with separated UI components and backend
 import sys
 import os
 import argparse
+import json
 from typing import List, Dict, Any, Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QProgressBar, QSplitter, QStatusBar, QMessageBox, QFileDialog,
-    QListWidgetItem
+    QListWidgetItem, QMenuBar, QMenu, QInputDialog, QLineEdit
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QIcon, QPixmap, QAction
 from PyQt6.QtSvg import QSvgRenderer
 
 # Import backend and UI components
@@ -33,15 +34,17 @@ class S3BrowserMainWindow(QMainWindow):
         self.s3_worker: Optional[S3Worker] = None
         self.saved_navigation_state: Optional[Dict[str, Any]] = None
         self.verbose = verbose
+        self.is_connected = False  # Track connection state
         
         # Pagination state
         self.all_loaded_files: List[Dict[str, Any]] = []  # All files loaded from S3
-        self.files_per_page = 1000  # Files to show per page in UI
+        self.files_per_page = 100  # Files to show per page in UI
         self.current_page = 1
         self.total_pages_available = 1
         self.pages_from_s3 = []  # Track S3 pages loaded
         
         self.init_ui()
+        self.setup_menu_bar()
         self.setup_status_bar()
         self.connect_signals()
     
@@ -93,17 +96,62 @@ class S3BrowserMainWindow(QMainWindow):
         # Add splitter with stretch factor so it expands to fill remaining space
         main_layout.addWidget(splitter, 1)  # stretch factor = 1
     
+    def setup_menu_bar(self):
+        """Setup the menu bar with Profile Management and Recent Profiles"""
+        menubar = self.menuBar()
+        
+        # Profiles menu
+        profiles_menu = menubar.addMenu("&Profiles")
+        
+        # Profile Management action
+        profile_mgmt_action = QAction("&Manage Profiles...", self)
+        profile_mgmt_action.setShortcut("Ctrl+M")
+        profile_mgmt_action.setStatusTip("Open Profile Management dialog")
+        profile_mgmt_action.triggered.connect(self.show_profile_management)
+        profiles_menu.addAction(profile_mgmt_action)
+        
+        profiles_menu.addSeparator()
+        
+        # Create New Profile action
+        self.create_profile_action = QAction("&Create New Profile from Current Connection", self)
+        self.create_profile_action.setShortcut("Ctrl+N")
+        self.create_profile_action.setStatusTip("Save current connection as a new profile")
+        self.create_profile_action.triggered.connect(self.create_profile_from_current)
+        self.create_profile_action.setEnabled(False)  # Disabled initially
+        profiles_menu.addAction(self.create_profile_action)
+        
+        profiles_menu.addSeparator()
+        
+        # Recent Profiles submenu
+        self.recent_profiles_menu = profiles_menu.addMenu("&Recent Profiles")
+        self.update_recent_profiles_menu()
+        
+        # Create separate Bookmarks menu
+        bookmarks_menu = menubar.addMenu("&Bookmarks")
+        
+        # Bookmarks submenu
+        self.bookmarks_menu = bookmarks_menu
+        self.update_bookmarks_menu()
+        
+    
     def setup_status_bar(self):
         """Setup the status bar"""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready to connect to S3-compatible storage")
     
+    def update_menu_states(self):
+        """Update menu item states based on connection status"""
+        self.create_profile_action.setEnabled(self.is_connected)
+        self.connection_widget.set_bookmarks_enabled(self.is_connected)
+    
     def connect_signals(self):
         """Connect signals between components"""
         # Connection widget signals
         self.connection_widget.connection_requested.connect(self.connect_to_s3)
         self.connection_widget.connection_cancelled.connect(self.cancel_connection)
+        self.connection_widget.profiles_changed.connect(self.update_recent_profiles_menu)
+        self.connection_widget.bookmark_added.connect(self.add_bookmark)
         
         # File list widget signals
         self.file_list_widget.item_double_clicked.connect(self.on_item_double_clicked)
@@ -217,10 +265,11 @@ class S3BrowserMainWindow(QMainWindow):
         files_loaded = len(self.all_loaded_files)
         
         # Show if we have 10+ pages from S3 and the last page had 1000 files (indicating more data)
+        # Note: S3 pages contain ~1000 files each, UI pages show 100 files each
         should_show_load_more = (
             s3_pages_loaded >= 10 and 
-            s3_pages_loaded % 10 == 0 and  # Loaded in multiples of 10 pages
-            files_loaded >= s3_pages_loaded * 1000  # Each page was full
+            s3_pages_loaded % 10 == 0 and  # Loaded in multiples of 10 S3 pages
+            files_loaded >= s3_pages_loaded * 1000  # Each S3 page was full
         )
         
         self.load_more_button.setVisible(should_show_load_more and not self.is_loading_more)
@@ -316,12 +365,16 @@ class S3BrowserMainWindow(QMainWindow):
             'bucket_name': bucket_name
         }
         
+        # Reset connection state and update menus
+        self.is_connected = False
+        self.update_menu_states()
+        
         # Reset pagination state for new connection
         self.all_loaded_files = []
         self.current_page = 1
         self.total_pages_available = 1
         self.pages_from_s3 = []
-        self.current_pages_loaded = 10  # Initial load
+        self.current_pages_loaded = 10  # Initial load (10 pages of 100 = 1000 files)
         
         # Reset pagination controls
         self.page_info_label.setText("Page 1 of 1")
@@ -359,6 +412,11 @@ class S3BrowserMainWindow(QMainWindow):
             self.s3_worker.stop_operation()
             self.progress_bar.setVisible(False)
             self.connection_widget.set_connect_enabled(True, show_cancel=False)
+            
+            # Mark as disconnected and update menu states
+            self.is_connected = False
+            self.update_menu_states()
+            
             self.status_bar.showMessage("Connection cancelled by user")
     
     def on_page_loaded(self, page_info: Dict[str, Any]):
@@ -410,14 +468,26 @@ class S3BrowserMainWindow(QMainWindow):
             self.file_list_widget.restore_navigation_state(self.saved_navigation_state)
             self.saved_navigation_state = None  # Clear it after use
         
+        # Mark as connected and update menu states
+        self.is_connected = True
+        self.update_menu_states()
+        
         if self.verbose:
             print(f"[VERBOSE] Final state: {len(self.all_loaded_files)} files, {self.total_pages_available} pages, showing page {self.current_page}")
+            print(f"[VERBOSE] Statistics calculation removed from file loading - will only run when statistics tab is accessed")
+        
+        # Store files for statistics but don't calculate automatically
+        self.details_widget.store_files_for_statistics(self.all_loaded_files)
     
     def on_error_occurred(self, error_message: str):
         """Handle errors from worker threads"""
         if self.verbose:
             print(f"[VERBOSE] Connection error occurred: {error_message}")
             
+        # Mark as disconnected and update menu states
+        self.is_connected = False
+        self.update_menu_states()
+        
         QMessageBox.critical(self, "Error", error_message)
         self.status_bar.showMessage("Error occurred")
     
@@ -440,6 +510,10 @@ class S3BrowserMainWindow(QMainWindow):
         """Handle maximum retries exceeded"""
         if self.verbose:
             print(f"[VERBOSE] All {total_attempts} connection attempts failed with final error: {final_error}")
+        
+        # Mark as disconnected and update menu states
+        self.is_connected = False
+        self.update_menu_states()
         
         # Show detailed error dialog
         error_message = f"Connection failed after {total_attempts} attempts.\n\n"
@@ -813,6 +887,239 @@ class S3BrowserMainWindow(QMainWindow):
         clipboard.setText(url)
         
         self.status_bar.showMessage(f"URL copied to clipboard: {url}")
+    
+    def show_profile_management(self):
+        """Show the profile management modal dialog"""
+        from ui.profile_management_dialog import ProfileManagementDialog
+        dialog = ProfileManagementDialog(self.connection_widget, self)
+        dialog.profile_selected.connect(self.on_profile_selected_from_dialog)
+        if dialog.exec():
+            self.update_recent_profiles_menu()
+    
+    def update_recent_profiles_menu(self):
+        """Update the Recent Profiles submenu with current profiles"""
+        self.recent_profiles_menu.clear()
+        
+        try:
+            profiles_file = os.path.join(os.path.expanduser("~"), ".s3_browser_profiles.json")
+            if os.path.exists(profiles_file):
+                with open(profiles_file, 'r') as f:
+                    profiles = json.load(f)
+                
+                if profiles:
+                    recent_profiles = list(profiles.keys())[:10]  # Show up to 10 recent profiles
+                    for profile_name in recent_profiles:
+                        action = QAction(profile_name, self)
+                        action.setStatusTip(f"Load profile: {profile_name}")
+                        action.triggered.connect(lambda checked, name=profile_name: self.load_profile_from_menu(name))
+                        self.recent_profiles_menu.addAction(action)
+                else:
+                    no_profiles_action = QAction("(No saved profiles)", self)
+                    no_profiles_action.setEnabled(False)
+                    self.recent_profiles_menu.addAction(no_profiles_action)
+            else:
+                no_profiles_action = QAction("(No saved profiles)", self)
+                no_profiles_action.setEnabled(False)
+                self.recent_profiles_menu.addAction(no_profiles_action)
+                
+        except Exception as e:
+            error_action = QAction("(Error loading profiles)", self)
+            error_action.setEnabled(False)
+            self.recent_profiles_menu.addAction(error_action)
+    
+    def load_profile_from_menu(self, profile_name: str):
+        """Load a profile from the menu selection"""
+        try:
+            profiles_file = os.path.join(os.path.expanduser("~"), ".s3_browser_profiles.json")
+            if os.path.exists(profiles_file):
+                with open(profiles_file, 'r') as f:
+                    profiles = json.load(f)
+                
+                if profile_name in profiles:
+                    self.connection_widget.load_profile_data(profiles[profile_name])
+                    self.status_bar.showMessage(f"Profile '{profile_name}' loaded")
+                else:
+                    QMessageBox.warning(self, "Profile Not Found", f"Profile '{profile_name}' no longer exists.")
+                    self.update_recent_profiles_menu()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not load profile: {e}")
+    
+    def on_profile_selected_from_dialog(self, profile_name: str):
+        """Handle profile selection from the management dialog"""
+        self.load_profile_from_menu(profile_name)
+    
+    def create_profile_from_current(self):
+        """Create a new profile from the current connection settings"""
+        # Get current connection data
+        current_data = self.connection_widget.get_current_profile_data()
+        
+        # Check if there's any data to save
+        if not any(current_data.values()):
+            QMessageBox.warning(self, "No Connection Data", 
+                              "Please enter connection details before creating a profile.")
+            return
+        
+        # Ask for profile name with a suggested name based on bucket or endpoint
+        suggested_name = current_data.get('bucket_name', '')
+        if not suggested_name:
+            endpoint = current_data.get('endpoint_url', '')
+            if endpoint:
+                # Extract domain from endpoint for suggestion
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(endpoint)
+                    suggested_name = parsed.netloc.split('.')[0] if parsed.netloc else 'New Profile'
+                except:
+                    suggested_name = 'New Profile'
+            else:
+                suggested_name = 'New Profile'
+        
+        profile_name, ok = QInputDialog.getText(
+            self, "Create New Profile", 
+            "Enter a name for this profile:",
+            QLineEdit.EchoMode.Normal,
+            suggested_name
+        )
+        
+        if not ok or not profile_name.strip():
+            return
+            
+        profile_name = profile_name.strip()
+        
+        # Load existing profiles
+        profiles_file = os.path.join(os.path.expanduser("~"), ".s3_browser_profiles.json")
+        profiles = {}
+        try:
+            if os.path.exists(profiles_file):
+                with open(profiles_file, 'r') as f:
+                    profiles = json.load(f)
+        except Exception as e:
+            print(f"Error loading existing profiles: {e}")
+        
+        # Check if profile already exists
+        if profile_name in profiles:
+            reply = QMessageBox.question(
+                self, "Profile Exists", 
+                f"Profile '{profile_name}' already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        
+        # Save the profile
+        profiles[profile_name] = current_data
+        try:
+            with open(profiles_file, 'w') as f:
+                json.dump(profiles, f, indent=2)
+            
+            # Update recent profiles menu
+            self.update_recent_profiles_menu()
+            
+            # Show success message
+            QMessageBox.information(self, "Profile Created", 
+                                  f"Profile '{profile_name}' has been created successfully!")
+            
+            self.status_bar.showMessage(f"Profile '{profile_name}' created")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not save profile: {e}")
+    
+    def add_bookmark(self, bookmark_data: Dict[str, str]):
+        """Add a new bookmark connection"""
+        bookmarks_file = os.path.join(os.path.expanduser("~"), ".s3_browser_bookmarks.json")
+        bookmarks = {}
+        
+        # Load existing bookmarks
+        try:
+            if os.path.exists(bookmarks_file):
+                with open(bookmarks_file, 'r') as f:
+                    bookmarks = json.load(f)
+        except Exception as e:
+            print(f"Error loading existing bookmarks: {e}")
+        
+        bookmark_name = bookmark_data.get('name', 'Unknown Bucket')
+        
+        # Check if bookmark already exists
+        if bookmark_name in bookmarks:
+            reply = QMessageBox.question(
+                self, "Bookmark Exists", 
+                f"Bookmark '{bookmark_name}' already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        
+        # Remove the 'name' key before saving
+        save_data = {k: v for k, v in bookmark_data.items() if k != 'name'}
+        bookmarks[bookmark_name] = save_data
+        
+        # Save bookmarks
+        try:
+            with open(bookmarks_file, 'w') as f:
+                json.dump(bookmarks, f, indent=2)
+            
+            # Update bookmarks menu
+            self.update_bookmarks_menu()
+            
+            self.status_bar.showMessage(f"Bookmark '{bookmark_name}' saved")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not save bookmark: {e}")
+    
+    def update_bookmarks_menu(self):
+        """Update the bookmarks menu with saved bookmarks"""
+        self.bookmarks_menu.clear()
+        
+        bookmarks_file = os.path.join(os.path.expanduser("~"), ".s3_browser_bookmarks.json")
+        try:
+            if os.path.exists(bookmarks_file):
+                with open(bookmarks_file, 'r') as f:
+                    bookmarks = json.load(f)
+                
+                if bookmarks:
+                    # Add bookmarks to menu
+                    for bookmark_name in sorted(bookmarks.keys()):
+                        action = QAction(f"⭐ {bookmark_name}", self)
+                        action.triggered.connect(lambda checked, name=bookmark_name: self.load_bookmark_from_menu(name))
+                        self.bookmarks_menu.addAction(action)
+                else:
+                    # No bookmarks yet
+                    no_bookmarks_action = QAction("No bookmarks saved", self)
+                    no_bookmarks_action.setEnabled(False)
+                    self.bookmarks_menu.addAction(no_bookmarks_action)
+            else:
+                # No bookmarks file yet
+                no_bookmarks_action = QAction("No bookmarks saved", self)
+                no_bookmarks_action.setEnabled(False)
+                self.bookmarks_menu.addAction(no_bookmarks_action)
+                
+        except Exception as e:
+            print(f"Error loading bookmarks: {e}")
+            error_action = QAction("Error loading bookmarks", self)
+            error_action.setEnabled(False)
+            self.bookmarks_menu.addAction(error_action)
+    
+    def load_bookmark_from_menu(self, bookmark_name: str):
+        """Load a bookmark connection from the menu"""
+        bookmarks_file = os.path.join(os.path.expanduser("~"), ".s3_browser_bookmarks.json")
+        try:
+            if os.path.exists(bookmarks_file):
+                with open(bookmarks_file, 'r') as f:
+                    bookmarks = json.load(f)
+                
+                if bookmark_name in bookmarks:
+                    bookmark_data = bookmarks[bookmark_name]
+                    self.connection_widget.load_profile_data(bookmark_data)
+                    self.status_bar.showMessage(f"Loaded bookmark: {bookmark_name}")
+                else:
+                    QMessageBox.warning(self, "Bookmark Not Found", 
+                                      f"Bookmark '{bookmark_name}' not found.")
+            else:
+                QMessageBox.warning(self, "No Bookmarks", "No bookmarks file found.")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not load bookmark: {e}")
+    
     
     def _get_connection_data(self) -> Dict[str, str]:
         """Get current connection data for URL generation"""

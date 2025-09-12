@@ -123,7 +123,9 @@ celerybeat.pid
 .env
 .venv
 env/
-venv/  # Multiple venvs cleaned up - keep only s3_browser_env/
+venv/
+s3_browser_env/
+test_env/
 ENV/
 env.bak/
 venv.bak/
@@ -192,11 +194,17 @@ Thumbs.db
 # Application-specific files
 # S3 Browser profile credentials (contains sensitive data)
 .s3_browser_profiles.json
+.s3_browser_bookmarks.json
+.s3_browser_favorites.json
 
 # Temporary download files
 downloads/
 temp/
 *.tmp
+
+# Build and release assets
+release-assets/
+build-assets/
 
 # Log files
 *.log
